@@ -16,7 +16,7 @@ config.resolver.nodeModulesPaths = [
 
 // Force the package name → real source path (avoids symlink issues in workspaces)
 config.resolver.extraNodeModules = {
-    'cheq-enforce-react': cheqPkgRoot,
+    '@cheq.ai/cheq-enforce-react': cheqPkgRoot,
 };
 
 config.resolver.unstable_enableSymlinks = true;

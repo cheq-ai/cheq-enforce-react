@@ -1,7 +1,7 @@
 import type { EnforceConfig } from "./Types";
 import { log, warn } from "./logger";
 
-const SDK_VERSION = "0.1.0";
+const SDK_VERSION = "0.0.1";
 const PROD_HOST = "https://nexus.ensighten.com";
 const TEST_HOST = "https://nexus-test.ensighten.com";
 const ERROR_PATH = "/error/e.gif";

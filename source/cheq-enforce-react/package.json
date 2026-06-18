@@ -1,18 +1,43 @@
 {
-    "name": "cheq-enforce-react",
-    "version": "0.1.0",
-    "description": "Consent SDK for React, React Native, and Web. Web uses localStorage; native consumers must install @react-native-async-storage/async-storage for persistence.",
+    "name": "@cheq.ai/cheq-enforce-react",
+    "version": "0.0.1",
+    "description": "CHEQ Enforce consent management SDK for React and React Native applications",
+    "author": "CHEQ AI Technologies <tms+npm@cheq.ai>",
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/cheq-ai/cheq-enforce-react.git"
+    },
+    "bugs": {
+        "url": "https://github.com/cheq-ai/cheq-enforce-react/issues"
+    },
+    "homepage": "https://github.com/cheq-ai/cheq-enforce-react#readme",
+    "keywords": [
+        "cheq",
+        "enforce",
+        "consent",
+        "privacy",
+        "gdpr",
+        "ccpa",
+        "react",
+        "react-native"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
     "type": "module",
     "main": "./dist/index.cjs",
     "module": "./dist/index.js",
     "types": "./dist/index.d.ts",
+    "react-native": "./dist/index.js",
     "files": [
-        "dist"
+        "dist",
+        "README.md"
     ],
     "sideEffects": false,
     "scripts": {
-        "build": "npx tsup",
-        "dev": "npx tsup --watch",
+        "build": "tsup && cp -f ../../README.md ./README.md",
+        "dev": "tsup --watch",
         "prepare": "npm run build",
         "test": "vitest run",
         "test:watch": "vitest"
