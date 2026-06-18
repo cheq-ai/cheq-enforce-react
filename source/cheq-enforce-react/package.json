@@ -1,6 +1,6 @@
 {
     "name": "@cheq.ai/cheq-enforce-react",
-    "version": "0.0.1",
+    "version": "0.1.0",
     "description": "CHEQ Enforce consent management SDK for React and React Native applications",
     "author": "CHEQ AI Technologies <tms+npm@cheq.ai>",
     "license": "Apache-2.0",
