@@ -5,7 +5,7 @@ Consent management SDK for React and React Native applications. This package ena
 ## Installation
 
 ```bash
-npm install cheq-enforce-react
+npm install @cheq.ai/cheq-enforce-react
 ```
 
 ## Requirements
@@ -16,7 +16,7 @@ npm install cheq-enforce-react
 ## Quick Start
 
 ```javascript
-import { Enforce, EnforceProvider } from "cheq-enforce-react";
+import { Enforce, EnforceProvider } from "@cheq.ai/cheq-enforce-react";
 
 // Wrap your app with EnforceProvider to enable the banner and modal UI
 export default function App() {
@@ -61,7 +61,7 @@ await Enforce.configure({
 Use `useConsent()` inside any component wrapped by `<EnforceProvider>`. It re-renders automatically whenever consent changes.
 
 ```javascript
-import { useConsent } from "cheq-enforce-react";
+import { useConsent } from "@cheq.ai/cheq-enforce-react";
 
 function MyComponent() {
     const { consent, checkConsent, loading } = useConsent();
@@ -195,7 +195,7 @@ The fallback is cleared on the next successful `configure()` call.
 The SDK throws `EnforceError` with a `kind` discriminator for programmatic handling:
 
 ```javascript
-import { EnforceError } from "cheq-enforce-react";
+import { EnforceError } from "@cheq.ai/cheq-enforce-react";
 
 try {
     await Enforce.setConsent({ Analytics: true });
@@ -225,7 +225,7 @@ On web, the SDK uses `localStorage` automatically. The async storage peer depend
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE) for details.
+Apache 2.0 — see [LICENSE](https://github.com/cheq-ai/cheq-enforce-react/blob/master/LICENSE) for details.
 
 ## Support
 

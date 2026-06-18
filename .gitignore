@@ -8,6 +8,7 @@ sample-app/*/package-lock.json
 
 # Build outputs
 dist/
+source/cheq-enforce-react/README.md
 build/
 coverage/
 .nyc_output/
