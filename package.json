@@ -1,0 +1,30 @@
+{
+  "name": "cheq-enforce-react-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "source/*",
+    "sample-app/**"
+  ],
+  "scripts": {
+    "clean:root": "rm -rf node_modules package-lock.json",
+    "clean:demo": "rm -rf sample-app/enforce-react-demo/node_modules sample-app/enforce-react-demo/package-lock.json",
+    "clean:src": "rm -rf source/cheq-enforce-react/node_modules",
+    "clean:dist": "rm -rf source/cheq-enforce-react/dist",
+    "clean": "npm run clean:root && npm run clean:demo && npm run clean:src && npm run clean:dist",
+    "build": "npm -w source/cheq-enforce-react run build",
+    "start": "npm run build && npm --prefix sample-app/enforce-react-demo run start",
+    "start:android": "npm run build && npm --prefix sample-app/enforce-react-demo run android",
+    "start:ios": "npm run build && npm --prefix sample-app/enforce-react-demo run ios",
+    "start:web": "npm run build && npm --prefix sample-app/enforce-react-demo run web"
+  },
+  "overrides": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2019",
+    "lib": [
+      "ES2019",
+      "DOM"
+    ],
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "source/*/src"
+  ],
+  "extends": "expo/tsconfig.base"
+}

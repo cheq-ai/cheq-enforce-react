@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "enforce-react-demo",
+    "slug": "enforce-react-demo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "enforcedemo",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cheq.enforceReactDemo"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.cheq.enforceReactDemo"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-dev-client"
+    ]
+  }
+}
