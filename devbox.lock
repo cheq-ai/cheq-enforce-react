@@ -5,7 +5,7 @@
       "last_modified": "2026-06-14T16:21:05Z",
       "resolved": "github:NixOS/nixpkgs/9eac87a12312b8f60dd52e1c6e1a265f6fc7f5fc?lastModified=1781454065&narHash=sha256-d2xfDjnfRuf%2FxYGdu9VVRHiav%2F2w5hDL%2F5cw2TuVAXw%3D"
     },
-    "nodejs@24": {
+    "nodejs@24.12.0": {
       "last_modified": "2025-12-27T12:56:01Z",
       "plugin_version": "0.0.2",
       "resolved": "github:NixOS/nixpkgs/3edc4a30ed3903fdf6f90c837f961fa6b49582d1#nodejs_24",
