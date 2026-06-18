@@ -73,7 +73,7 @@ interface ConsentPayload {
 
 const REPORTING_HOST = "https://data.privacy.ensighten.com";
 const REPORTING_PLATFORM = "react_native_sdk";
-const REPORTING_SDK_VERSION = "0.1.0";
+const REPORTING_SDK_VERSION = "0.0.1";
 const LZ4_HASH_TABLE_SIZE = 1 << 16;
 
 let billingSent = false;

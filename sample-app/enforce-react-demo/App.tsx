@@ -13,7 +13,7 @@ import {
     Enforce,
     EnforceProvider,
     useConsent,
-} from "cheq-enforce-react";
+} from "@cheq.ai/cheq-enforce-react";
 
 // ---------------------------------------------------------------------------
 // Configuration — replace with your real values

@@ -15,15 +15,17 @@ cheq-enforce-react/
 │       └── vitest.config.ts     # Test configuration
 ├── sample-app/
 │   └── enforce-react-demo/      # Demo application (Expo)
+├── .github/
+│   └── workflows/               # GitHub Actions (NPM publish)
 ├── package.json                 # Workspace root
+├── push-github.sh               # Script to push to GitHub mirror
 ├── README.md                    # User documentation
 └── DEVELOPMENT.md               # This file
 ```
 
 ## Prerequisites
 
-- Node.js 18 or higher
-- npm 9 or higher
+- [Devbox](https://www.jetpack.io/devbox/docs/installing_devbox/)
 - For mobile development:
     - iOS: Xcode, CocoaPods
     - Android: Android Studio, JDK 11+
@@ -31,11 +33,11 @@ cheq-enforce-react/
 ## Getting Started
 
 ```bash
-# Install all workspace dependencies
-npm install
-
 # Build the package
-npm run build
+devbox run build
+
+# Run the demo app (web)
+devbox run local
 ```
 
 ## Development Workflow
@@ -52,6 +54,7 @@ npm run dev
 ### Clean Build
 
 ```bash
+devbox shell
 npm run clean
 npm install
 npm run build
@@ -75,20 +78,26 @@ npm run start:web
 
 ## Package Configuration
 
-The package (`source/cheq-enforce-react/package.json`) produces two builds via `tsup`:
+The package (`source/cheq-enforce-react/package.json`) is configured for:
+
+- **ESM and CommonJS** dual output
+- **React Native** specific entry point
+- **TypeScript declarations** included
+
+### Entry Points
 
 | Export | File | Description |
 |--------|------|-------------|
 | `main` | `dist/index.cjs` | CommonJS entry |
 | `module` | `dist/index.js` | ESM entry |
-| `types` | `dist/index.d.ts` | TypeScript declarations |
-| `react-native` | `dist/index.native.js` | React Native entry (resolves `.native.*` files) |
+| `types` | `dist/index.d.ts` | TypeScript types |
+| `react-native` | `dist/index.native.js` | React Native entry |
 
 ## Testing
 
 ```bash
 cd source/cheq-enforce-react
-npx vitest run
+npm test
 ```
 
 ## Versioning
@@ -101,15 +110,18 @@ Follow [Semantic Versioning](https://semver.org/):
 
 ### Version Locations
 
-Update the version in **all** of these places before releasing:
+Update version in **ALL** of these places before releasing:
 
-1. `source/cheq-enforce-react/package.json` — `"version"` field
-2. `source/cheq-enforce-react/src/ErrorReporting.ts` — `SDK_VERSION` constant
-3. `source/cheq-enforce-react/src/ConsentReporting.ts` — `REPORTING_SDK_VERSION` constant
+1. `package.json` (root) — `"version"` field
+2. `source/cheq-enforce-react/package.json` — `"version"` field
+3. `source/cheq-enforce-react/src/ErrorReporting.ts` — `SDK_VERSION` constant
+4. `source/cheq-enforce-react/src/ConsentReporting.ts` — `REPORTING_SDK_VERSION` constant
+5. `sample-app/enforce-react-demo/package.json` — `"version"` field
+6. `sample-app/enforce-react-demo/app.json` — `"version"` field
 
 ## Release Process
 
-Uses git flow. The NPM publish happens automatically when the tag is pushed to GitHub.
+Use git flow to create releases. The NPM publish happens automatically when the tag is pushed to GitHub.
 
 ### 1. Start Release
 
@@ -119,7 +131,7 @@ git flow release start <VERSION> && git flow release publish
 
 ### 2. Update Version Numbers
 
-Update the version in all locations listed above under "Version Locations".
+Update version in all locations listed above under "Version Locations".
 
 ### 3. Commit and Push
 
@@ -129,16 +141,16 @@ git commit -m "Bump version to <VERSION>"
 git push
 ```
 
-### 4. Build and Test
+### 4. Test
 
 ```bash
-npm run build
-npm start
+devbox run build
+devbox run local
 ```
 
 ### 5. Create Pull Request
 
-Create a PR: `release/<VERSION>` → `main`
+Create a PR: `release/<VERSION>` → `master`
 
 Wait for approval before proceeding.
 
@@ -154,11 +166,11 @@ git flow release finish <VERSION> -p
 ./push-github.sh
 ```
 
-This pushes `main` and tags to GitHub, which triggers the GitHub Actions workflow to publish to NPM.
+This pushes `master` and tags to GitHub, which triggers the GitHub Actions workflow to publish to NPM.
 
 ### 8. Verify Publication
 
-1. Check GitHub Actions completed: *(URL to be added)*
+1. Check GitHub Actions completed: https://github.com/cheq-ai/cheq-enforce-react/actions
 2. Verify package: https://www.npmjs.com/package/@cheq.ai/cheq-enforce-react
 3. Test installation: `npm install @cheq.ai/cheq-enforce-react@<VERSION>`
 
@@ -189,10 +201,10 @@ Before releasing, test on:
 
 - **Package Name**: `@cheq.ai/cheq-enforce-react`
 - **Registry**: https://registry.npmjs.org/
-- **Organisation**: @cheq.ai
+- **Organization**: @cheq.ai
 - **License**: Apache-2.0
 
 ## Repository Mirrors
 
 - **Primary (Bitbucket)**: Internal development
-- **GitHub Mirror**: *(URL to be added)*
+- **GitHub Mirror**: https://github.com/cheq-ai/cheq-enforce-react (public, NPM publishing)
