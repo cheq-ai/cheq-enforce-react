@@ -2,6 +2,8 @@ import { compressBlock, compressBound, makeBuffer } from "lz4js";
 import type { EnforceConfig, RemoteConfig } from "./Types";
 import { sendError } from "./ErrorReporting";
 import { log, warn } from "./logger";
+import { clearReportingEvents, loadReportingEvents, saveReportingEvents } from "./Storage";
+import { buildGatewayVersion, SDK_PLATFORM, SDK_VERSION } from "./version";
 
 export type ReportingBeaconType = "billing" | "consent";
 export type ReportingFlags = Record<string, boolean>;
@@ -17,7 +19,8 @@ interface ReportingSendOptions {
 
 interface ReportingContext {
     clientId: string;
-    version: string;
+    /** Combined version string reported to the backend — see buildGatewayVersion. */
+    gateway: string;
     enforcement: boolean;
 }
 
@@ -72,13 +75,13 @@ interface ConsentPayload {
 }
 
 const REPORTING_HOST = "https://data.privacy.ensighten.com";
-const REPORTING_PLATFORM = "react_native_sdk";
-const REPORTING_SDK_VERSION = "0.1.0";
 const LZ4_HASH_TABLE_SIZE = 1 << 16;
 
 let billingSent = false;
 let consentBeaconCount = 0;
 let storedCookieFlags: ReportingFlags = {};
+let storedEventFlags: ReportingFlags = {};
+let eventFlagsHydrated = false;
 
 function now(): number {
     return Date.now();
@@ -98,7 +101,52 @@ export function resetReportingState(): void {
     billingSent = false;
     consentBeaconCount = 0;
     storedCookieFlags = {};
+    storedEventFlags = {};
+    eventFlagsHydrated = false;
     instanceId = createInstanceId();
+}
+
+/**
+ * Event flags (e.g. BANNER_VIEWED, MODAL_LOADED) reported so far in this
+ * session, including any hydrated from storage.
+ */
+export function getReportedEventFlags(): ReportingFlags {
+    return { ...storedEventFlags };
+}
+
+/**
+ * Remove all reported flags — the accumulated cookie flags (categories and
+ * events) from memory and the persisted event flags from storage — so beacons
+ * sent after consent is cleared or invalidated start clean.
+ */
+export async function clearReportedFlags(): Promise<void> {
+    storedCookieFlags = {};
+    storedEventFlags = {};
+    try {
+        await clearReportingEvents();
+    } catch {
+        // storage failures must never break consent clearing
+    }
+}
+
+/**
+ * Merge event flags persisted by previous sessions into the in-memory
+ * accumulators, once per session, so beacons after an app restart still
+ * report events made before it (e.g. BANNER_LOADED with no consent given).
+ */
+async function hydrateEventFlags(config: EnforceConfig): Promise<void> {
+    if (eventFlagsHydrated) return;
+    eventFlagsHydrated = true;
+
+    try {
+        const persisted = await loadReportingEvents();
+        if (persisted && Object.keys(persisted).length > 0) {
+            storedEventFlags = { ...persisted, ...storedEventFlags };
+            storedCookieFlags = { ...persisted, ...storedCookieFlags };
+        }
+    } catch (error) {
+        warn(config.debug, "failed to load persisted event flags", error);
+    }
 }
 
 function toNumericFlags(flags?: ReportingFlags): Record<string, number> {
@@ -191,7 +239,7 @@ function buildReportingContext(
 
     return {
         clientId: remoteConfig.clientId,
-        version: remoteConfig.version,
+        gateway: buildGatewayVersion(remoteConfig.version),
         enforcement: remoteConfig.enforcement,
     };
 }
@@ -223,10 +271,12 @@ function buildBillingPayload(
         clientId: context.clientId,
         instanceId,
         version: "1.0.0",
-        gateway: context.version,
+        gateway: context.gateway,
+        // Billing cookies use bare flag names; only consent beacons use the
+        // CLIENT_ENSIGHTEN_PRIVACY_-prefixed cookie names.
         cookies: Object.fromEntries(
             Object.entries(storedCookieFlags).map(([flag, value]) => [
-                toCookieName(config.clientName, flag),
+                flag,
                 value ? "1" : "0",
             ])
         ),
@@ -255,7 +305,7 @@ function buildConsentPayload(
 
     return {
         version: "1.0.0",
-        gateway: context.version,
+        gateway: context.gateway,
         clientId: context.clientId,
         clientName: config.clientName,
         publishPath: config.publishPath,
@@ -275,7 +325,12 @@ function buildBeaconPath(type: ReportingBeaconType): string {
     return type === "billing" ? "/privacy/v1/b/b.rnc" : "/privacy/v1/c/b.rnc";
 }
 
-function buildBeaconCount(type: ReportingBeaconType): number {
+/**
+ * Claim the next beacon index (`n`): 0 for billing, then 1, 2, … for consent
+ * beacons. An index is used up even if its beacon fails to send, so a gap
+ * tells the backend a beacon was lost.
+ */
+function claimBeaconIndex(type: ReportingBeaconType): number {
     if (type === "billing") {
         return 0;
     }
@@ -286,6 +341,7 @@ function buildBeaconCount(type: ReportingBeaconType): number {
 
 function buildBeaconUrl(
     type: ReportingBeaconType,
+    index: number,
     context: ReportingContext,
     payload: object,
     config: EnforceConfig
@@ -295,12 +351,12 @@ function buildBeaconUrl(
     const compressedBytes = compressRawLz4(payloadBytes);
     const encodedPayload = toBase64Url(compressedBytes);
     const queryParams = {
-        n: String(buildBeaconCount(type)),
+        n: String(index),
         c: context.clientId,
         i: instanceId,
         p: config.publishPath,
-        utm_platform: REPORTING_PLATFORM,
-        utm_sdk_version: REPORTING_SDK_VERSION,
+        utm_platform: SDK_PLATFORM,
+        utm_sdk_version: SDK_VERSION,
         s: String(payloadBytes.length),
         d: encodedPayload,
     };
@@ -356,6 +412,8 @@ export async function sendReportingBeacon(options: ReportingSendOptions): Promis
                 return;
             }
 
+            await hydrateEventFlags(config);
+
             // Seed storedCookieFlags with existing consent so the billing
             // payload reflects the current consent state on re-launches.
             if (cookieFlags && Object.keys(cookieFlags).length > 0) {
@@ -367,7 +425,7 @@ export async function sendReportingBeacon(options: ReportingSendOptions): Promis
                 context,
                 requestTimestamp ?? now()
             );
-            const url = buildBeaconUrl(type, context, payload, config);
+            const url = buildBeaconUrl(type, claimBeaconIndex(type), context, payload, config);
             await dispatchBeacon(config, url);
             billingSent = true;
             return;
@@ -385,8 +443,21 @@ export async function sendReportingBeacon(options: ReportingSendOptions): Promis
             };
         }
 
+        if (eventFlags && Object.keys(eventFlags).length > 0) {
+            await hydrateEventFlags(config);
+            storedEventFlags = {
+                ...storedEventFlags,
+                ...eventFlags,
+            };
+            try {
+                await saveReportingEvents(storedEventFlags);
+            } catch (error) {
+                warn(config.debug, "failed to persist event flags", error);
+            }
+        }
+
         const payload = buildConsentPayload(config, context, mergedFlags);
-        const url = buildBeaconUrl(type, context, payload, config);
+        const url = buildBeaconUrl(type, claimBeaconIndex(type), context, payload, config);
         await dispatchBeacon(config, url);
     } catch (error) {
         warn(config.debug, "reporting beacon build failed", error);

@@ -96,9 +96,10 @@ The package (`source/cheq-enforce-react/package.json`) is configured for:
 ## Testing
 
 ```bash
-cd source/cheq-enforce-react
 npm test
 ```
+
+From the repo root, this typechecks and builds the SDK and then runs its tests.
 
 ## Versioning
 
@@ -110,14 +111,22 @@ Follow [Semantic Versioning](https://semver.org/):
 
 ### Version Locations
 
-Update version in **ALL** of these places before releasing:
+The version lives in these places, and `npm run set-version <VERSION>` updates all of them:
 
 1. `package.json` (root) — `"version"` field
 2. `source/cheq-enforce-react/package.json` — `"version"` field
-3. `source/cheq-enforce-react/src/ErrorReporting.ts` — `SDK_VERSION` constant
-4. `source/cheq-enforce-react/src/ConsentReporting.ts` — `REPORTING_SDK_VERSION` constant
-5. `sample-app/enforce-react-demo/package.json` — `"version"` field
-6. `sample-app/enforce-react-demo/app.json` — `"version"` field
+3. `sample-app/enforce-react-demo/package.json` — `"version"` field
+4. `sample-app/enforce-react-demo/app.config.js` — read from the demo's `package.json`, nothing to edit
+
+`npm run verify-version <VERSION>` checks that they all match. The publish
+workflow runs it against the pushed tag and fails before publishing on a
+mismatch.
+
+The SDK version reported at runtime (beacon `utm_sdk_version`, the combined
+`gateway` version string, and the error-beacon User-Agent) is injected at
+build time from `source/cheq-enforce-react/package.json` via the tsup
+`define` (`__SDK_VERSION__` in `src/version.ts`) — there are no source
+constants to update.
 
 ## Release Process
 
@@ -131,7 +140,9 @@ git flow release start <VERSION> && git flow release publish
 
 ### 2. Update Version Numbers
 
-Update version in all locations listed above under "Version Locations".
+```bash
+npm run set-version <VERSION>
+```
 
 ### 3. Commit and Push
 

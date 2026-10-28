@@ -4,6 +4,7 @@ import {
     Pressable,
     ScrollView,
     StyleSheet,
+    Switch,
     Text,
     TextInput,
     View,
@@ -14,6 +15,7 @@ import {
     EnforceProvider,
     useConsent,
 } from "@cheq.ai/cheq-enforce-react";
+import { THEME_OPTIONS, THEME_OPTION_KEYS, type ThemeOptionKey } from "./themes";
 
 // ---------------------------------------------------------------------------
 // Configuration — replace with your real values
@@ -21,6 +23,30 @@ import {
 const CLIENT_NAME = "demoretail";
 const PUBLISH_PATH = "mobile_privacy_sdk";
 const ENVIRONMENT = "English";
+
+const BASE_CONFIG = {
+    clientName: CLIENT_NAME,
+    publishPath: PUBLISH_PATH,
+    environment: ENVIRONMENT,
+    debug: true,
+    dataRetentionPeriod: 60000, // 60 s for demo — use 1 year in prod
+    version: "1",
+    defaultConsent: { Analytics: true, Marketing: false, Functional: true },
+};
+
+/** Pretty-print a nested object for the on-screen log (YAML-ish indentation). */
+function formatForLog(value: unknown, indent: string): string {
+    if (value === null || typeof value !== "object") {
+        return `${indent}${String(value)}`;
+    }
+    return Object.entries(value as Record<string, unknown>)
+        .map(([key, entry]) =>
+            entry !== null && typeof entry === "object"
+                ? `${indent}${key}:\n${formatForLog(entry, `${indent}  `)}`
+                : `${indent}${key}: ${String(entry)}`
+        )
+        .join("\n");
+}
 
 function parseConsentInput(input: string): {
     parsed: Record<string, boolean> | null;
@@ -89,6 +115,10 @@ function InnerApp() {
     const [consentQueryMessage, setConsentQueryMessage] = useState<string | null>(null);
     const [consentUpdateInput, setConsentUpdateInput] = useState("");
     const [consentUpdateMessage, setConsentUpdateMessage] = useState<string | null>(null);
+    const [useCustomTheme, setUseCustomTheme] = useState(false);
+    const [selectedTheme, setSelectedTheme] = useState<ThemeOptionKey>("allFields");
+    const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+    const [configurationMessage, setConfigurationMessage] = useState<string | null>(null);
     const hasStoredConsent = Object.keys(consent).length > 0;
 
     const addLog = (msg: string) =>
@@ -104,20 +134,46 @@ function InnerApp() {
         });
     }, []);
 
+    // The theme is applied at configure() time, so toggling the custom theme
+    // (or picking a different one) re-runs configure with the new theme.
     useEffect(() => {
-        addLog("Configuring Enforce…");
+        addLog(
+            useCustomTheme
+                ? `Configuring Enforce… (theme: ${THEME_OPTIONS[selectedTheme].label})`
+                : "Configuring Enforce…"
+        );
         Enforce.configure({
-            clientName: CLIENT_NAME,
-            publishPath: PUBLISH_PATH,
-            environment: ENVIRONMENT,
-            debug: true,
-            dataRetentionPeriod: 60000, // 30 s for demo — use 1 year in prod
-            version: "1",
-            defaultConsent: { Analytics: true, Marketing: false, Functional: true },
+            ...BASE_CONFIG,
+            ...(useCustomTheme && { theme: THEME_OPTIONS[selectedTheme].theme }),
         })
             .then(() => addLog("configure() complete"))
             .catch((e: Error) => addLog(`configure() error: ${e.message}`));
-    }, []);
+    }, [useCustomTheme, selectedTheme]);
+
+    const handleGetConfiguration = () => {
+        try {
+            const configuration = Enforce.getConfiguration();
+            if (!configuration) {
+                setConfigurationMessage("getConfiguration(): null — remote configuration unavailable.");
+                addLog("getConfiguration(): null");
+                return;
+            }
+
+            const categories = Object.keys(configuration.translation.cookies ?? {}).length;
+            setConfigurationMessage(
+                `getConfiguration(): clientId ${configuration.clientId ?? "—"}, ` +
+                    `version ${configuration.version ?? "—"}, ` +
+                    `banner ${configuration.enablePrivacyNotice ?? false}, ` +
+                    `modal ${configuration.enableConsentModal ?? false}, ` +
+                    `${categories} categories. Full output in Log.`
+            );
+            addLog(`getConfiguration():\n${formatForLog(configuration, "  ")}`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : "Unknown error";
+            setConfigurationMessage(`getConfiguration() failed: ${message}`);
+            addLog(`getConfiguration() error: ${message}`);
+        }
+    };
 
     const handleShowBanner = () => {
         Enforce.showBanner();
@@ -155,6 +211,28 @@ function InnerApp() {
             addLog(`setEnvironment("${nextEnvironment}") error: ${message}`);
         } finally {
             setEnvironmentPending(false);
+        }
+    };
+
+    const handleGetEnvironment = () => {
+        const message = `getEnvironment(): ${Enforce.getEnvironment() ?? "null"}`;
+        setEnvironmentMessage(message);
+        setEnvironmentError(null);
+        addLog(message);
+    };
+
+    const handleResetEnvironment = async () => {
+        try {
+            await Enforce.resetEnvironment();
+            const currentEnvironment = Enforce.getEnvironment();
+            setEnvironment(currentEnvironment ?? ENVIRONMENT);
+            setEnvironmentMessage(`Environment reset to "${currentEnvironment ?? ENVIRONMENT}".`);
+            setEnvironmentError(null);
+            addLog(`resetEnvironment() complete — now "${currentEnvironment ?? ENVIRONMENT}"`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : "Unknown error";
+            setEnvironmentError(`resetEnvironment() failed: ${message}`);
+            addLog(`resetEnvironment() error: ${message}`);
         }
     };
 
@@ -279,6 +357,50 @@ function InnerApp() {
                 <View style={styles.actions}>
                     <ActionButton text="Show Banner" onPress={handleShowBanner} />
                     <ActionButton text="Show Modal" onPress={handleShowModal} />
+                    <View style={styles.themeRow}>
+                        <Text style={styles.themeLabel}>Use Custom Theme</Text>
+                        <Switch
+                            value={useCustomTheme}
+                            onValueChange={(value) => {
+                                setUseCustomTheme(value);
+                                setThemeMenuOpen(false);
+                            }}
+                        />
+                    </View>
+                    {useCustomTheme && (
+                        <View style={styles.themePicker}>
+                            <Pressable
+                                onPress={() => setThemeMenuOpen((open) => !open)}
+                                accessibilityRole="button"
+                                style={styles.themeSelectorRow}
+                            >
+                                <Text style={styles.themeSelector}>
+                                    {THEME_OPTIONS[selectedTheme].label}
+                                </Text>
+                                <Text style={styles.themeSelectorChevron}>▾</Text>
+                            </Pressable>
+                            {themeMenuOpen &&
+                                THEME_OPTION_KEYS.map((key) => (
+                                    <Pressable
+                                        key={key}
+                                        onPress={() => {
+                                            setSelectedTheme(key);
+                                            setThemeMenuOpen(false);
+                                        }}
+                                        accessibilityRole="button"
+                                    >
+                                        <Text
+                                            style={[
+                                                styles.themeOption,
+                                                key === selectedTheme && styles.themeOptionSelected,
+                                            ]}
+                                        >
+                                            {THEME_OPTIONS[key].label}
+                                        </Text>
+                                    </Pressable>
+                                ))}
+                        </View>
+                    )}
                     <View style={styles.environmentSection}>
                         <Text style={styles.inputLabel}>Environment</Text>
                         <TextInput
@@ -300,6 +422,8 @@ function InnerApp() {
                             disabled={environmentPending}
                             accessory={environmentPending ? <ActivityIndicator color="#fff" size="small" /> : null}
                         />
+                        <ActionButton text="Get Environment" onPress={handleGetEnvironment} />
+                        <ActionButton text="Reset Environment" onPress={handleResetEnvironment} />
                         {environmentMessage ? (
                             <Text style={styles.successMessage}>{environmentMessage}</Text>
                         ) : null}
@@ -367,6 +491,12 @@ function InnerApp() {
                         />
                         {consentUpdateMessage ? (
                             <Text style={styles.value}>{consentUpdateMessage}</Text>
+                        ) : null}
+                    </View>
+                    <View style={styles.environmentSection}>
+                        <ActionButton text="Get Configuration" onPress={handleGetConfiguration} />
+                        {configurationMessage ? (
+                            <Text style={styles.value}>{configurationMessage}</Text>
                         ) : null}
                     </View>
                     <ActionButton text="Clear Consent" onPress={handleClearConsent} danger />
@@ -516,6 +646,44 @@ const styles = StyleSheet.create({
     },
     actions: {
         gap: 10,
+    },
+    themeRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        paddingVertical: 4,
+    },
+    themeLabel: {
+        fontSize: 14,
+        fontWeight: "600",
+        color: "#111",
+    },
+    themePicker: {
+        gap: 6,
+    },
+    themeSelectorRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 4,
+    },
+    themeSelector: {
+        fontSize: 15,
+        color: "#1a73e8",
+        fontWeight: "600",
+    },
+    themeSelectorChevron: {
+        fontSize: 12,
+        color: "#1a73e8",
+    },
+    themeOption: {
+        fontSize: 14,
+        color: "#333",
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+    },
+    themeOptionSelected: {
+        color: "#1a73e8",
+        fontWeight: "700",
     },
     environmentSection: {
         gap: 8,

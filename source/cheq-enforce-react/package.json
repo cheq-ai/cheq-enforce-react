@@ -1,6 +1,6 @@
 {
     "name": "@cheq.ai/cheq-enforce-react",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "CHEQ Enforce consent management SDK for React and React Native applications",
     "author": "CHEQ AI Technologies <tms+npm@cheq.ai>",
     "license": "Apache-2.0",
@@ -29,7 +29,7 @@
     "main": "./dist/index.cjs",
     "module": "./dist/index.js",
     "types": "./dist/index.d.ts",
-    "react-native": "./dist/index.js",
+    "react-native": "./dist/index.native.js",
     "files": [
         "dist",
         "README.md"
@@ -39,6 +39,8 @@
         "build": "tsup && cp -f ../../README.md ./README.md",
         "dev": "tsup --watch",
         "prepare": "npm run build",
+        "typecheck": "tsc --noEmit",
+        "pretest": "npm run typecheck && npm run build",
         "test": "vitest run",
         "test:watch": "vitest"
     },

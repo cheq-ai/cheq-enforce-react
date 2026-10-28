@@ -18,6 +18,11 @@ export type { ConsentModalProps } from "./ConsentModal";
 // Types
 export type {
     EnforceConfig,
+    EnforceConfiguration,
+    EnforceTranslation,
+    EnforceCookieDetails,
+    EnforceBannerConfig,
+    EnforceConsentModalConfig,
     RemoteConfig,
     Translation,
     BannerConfig,
@@ -28,3 +33,22 @@ export type {
     EnforceErrorKind,
 } from "./Types";
 export { EnforceError } from "./Types";
+
+// Theme types
+export type {
+    EnforceTheme,
+    EnforceBannerTheme,
+    EnforceModalTheme,
+    ThemeTextStyle,
+    ThemeButtonStyle,
+    BannerButtonsTheme,
+    ModalButtonsTheme,
+    ThemeFontWeight,
+    ThemeTextAlignment,
+    ThemeLogoAlignment,
+    ModalPresentationStyle,
+    BannerButtonName,
+    ModalButtonName,
+    ResolvedBannerTheme,
+    ResolvedModalTheme,
+} from "./ThemeTypes";

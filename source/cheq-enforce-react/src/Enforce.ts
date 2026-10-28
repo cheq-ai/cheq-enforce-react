@@ -6,22 +6,49 @@
  * by the <EnforceProvider> React component.
  */
 
-import type { ConsentData, EnforceConfig, RemoteConfig } from "./Types";
-import { sendReportingBeacon } from "./ConsentReporting";
+import type { ConsentData, EnforceConfig, EnforceConfiguration, RemoteConfig } from "./Types";
+import { clearReportedFlags, sendReportingBeacon } from "./ConsentReporting";
 import { sendError } from "./ErrorReporting";
 import { EnforceError } from "./Types";
-import { loadConsent, saveConsent, clearConsent } from "./Storage";
+import {
+    loadConsent,
+    saveConsent,
+    clearConsent,
+    loadEnvironmentOverride,
+    saveEnvironmentOverride,
+    clearEnvironmentOverride,
+} from "./Storage";
 import { fetchRemoteConfig } from "./api";
 import { configurePlatform } from "./configurePlatform";
 import { log, warn } from "./logger";
+import { parseThemeInput, resolveTheme, type ParsedTheme } from "./ThemeResolver";
+import { toEnforceConfiguration } from "./PublicConfiguration";
+import type { ResolvedTheme } from "./ThemeTypes";
 
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
 
 let _config: EnforceConfig | null = null;
+// The last remote config fetched. Drives the consent UI and beacons, which
+// keep using it until a replacement is adopted.
 let _remoteConfig: RemoteConfig | null = null;
+// The environment _remoteConfig was fetched for. getConfiguration() serves it
+// only while this matches the effective environment.
+let _remoteConfigEnvironment: string | null = null;
+let _resolvedTheme: ResolvedTheme | null = null;
 let _environmentChangeRequestId = 0;
+// Incremented by each configure() so a superseded call stops applying state.
+let _configureGeneration = 0;
+// The environment passed to configure(), so resetEnvironment() can revert to
+// it. _config.environment always holds the *effective* environment.
+let _configuredEnvironment: string | null = null;
+// The configured environment's remote config, kept so resetEnvironment() can
+// restore it without a refetch.
+let _configuredRemoteConfig: RemoteConfig | null = null;
+// True when configure() was handled by the platform layer (web), where the
+// SDK never fetches the remote config or renders the consent UI.
+let _handledByPlatform = false;
 
 // Callbacks registered by <EnforceProvider>
 let _onShowBanner: (() => void) | null = null;
@@ -54,6 +81,79 @@ type ConsentValidationResult =
 function requireConfig(): EnforceConfig {
     if (!_config) throw EnforceError.notConfigured();
     return _config;
+}
+
+/** Fallback retention period (ms) when the config does not set one: 1 year. */
+const DEFAULT_DATA_RETENTION_PERIOD = 31_536_000_000;
+
+function dataRetentionPeriod(config: EnforceConfig): number {
+    return config.dataRetentionPeriod ?? DEFAULT_DATA_RETENTION_PERIOD;
+}
+
+/**
+ * Return the persisted environment override if one exists and has not
+ * expired. An expired override is deleted at read time (lazy expiry).
+ */
+async function getValidEnvironmentOverride(config: EnforceConfig): Promise<string | null> {
+    const override = await loadEnvironmentOverride();
+    if (!override) return null;
+
+    if (now() >= override.expiresAt) {
+        try {
+            await clearEnvironmentOverride();
+        } catch (error) {
+            // The override is expired either way, so a failed cleanup must not
+            // stop configure(); the next read retries it.
+            warn(config.debug, "failed to clear expired environment override", error);
+            void sendError({
+                msg: error instanceof Error ? error.message : String(error),
+                fn: "Enforce.getValidEnvironmentOverride.clearExpired",
+                config,
+                clientId: _remoteConfig?.clientId,
+            });
+        }
+        return null;
+    }
+    return override.environment;
+}
+
+/**
+ * Persist an environment override for future launches. Its expiry snapshots
+ * the stored consent record's expiry when one exists (the override must not
+ * outlive the consent period it was set under), otherwise the configured
+ * retention period — an override must never outlive the retention policy.
+ *
+ * Skipped when a newer environment change (setEnvironment, resetEnvironment
+ * or configure) started after `requestId` was taken. The check runs after the
+ * consent read and right before the write, with no await in between: a reset
+ * bumps the request id before issuing its clear, so the clear cannot be
+ * followed by this write.
+ *
+ * Native only: setEnvironment() returns earlier on web.
+ */
+async function persistEnvironmentOverride(
+    environment: string,
+    config: EnforceConfig,
+    requestId: number
+): Promise<void> {
+    try {
+        const stored = normalizeStoredConsent(await loadConsent());
+        if (requestId !== _environmentChangeRequestId) return;
+        const expiresAt = stored
+            ? stored.savedAt + stored.dataRetentionPeriod
+            : now() + dataRetentionPeriod(config);
+        await saveEnvironmentOverride(environment, expiresAt);
+    } catch (error) {
+        // The session switch already succeeded; failing to persist must not
+        // reject the setEnvironment call.
+        warn(config.debug, "failed to persist environment override", error);
+        void sendError({
+            msg: error instanceof Error ? error.message : String(error),
+            fn: "Enforce.setEnvironment.persistOverride",
+            config,
+            clientId: _remoteConfig?.clientId,
+        });
+    }
 }
 
 function now(): number {
@@ -104,19 +204,28 @@ function normalizeStoredConsent(data: unknown): ConsentData | null {
         Number.isFinite(candidate.expiresAt) &&
         typeof candidate.version === "string"
     ) {
-        if (candidate.expiresAt <= now()) {
+        // One clock read, so savedAt + dataRetentionPeriod equals expiresAt exactly.
+        const currentTime = now();
+        if (candidate.expiresAt <= currentTime) {
             return null;
         }
 
         return {
             categories: candidate.categories,
-            savedAt: now(),
-            dataRetentionPeriod: candidate.expiresAt - now(),
+            savedAt: currentTime,
+            dataRetentionPeriod: candidate.expiresAt - currentTime,
             version: candidate.version,
         };
     }
 
     return null;
+}
+
+/** True for a stored record in the older format (expiresAt, no savedAt). */
+function isLegacyConsent(data: unknown): boolean {
+    if (!data || typeof data !== "object") return false;
+    const candidate = data as Partial<ConsentData> & LegacyConsentData;
+    return typeof candidate.expiresAt === "number" && typeof candidate.savedAt !== "number";
 }
 
 function validateConsentData(
@@ -163,7 +272,7 @@ function buildConsentData(
     return {
         categories,
         savedAt: now(),
-        dataRetentionPeriod: config.dataRetentionPeriod ?? 31_536_000_000,
+        dataRetentionPeriod: dataRetentionPeriod(config),
         version: config.version ?? "1",
     };
 }
@@ -227,6 +336,57 @@ function notifyConsentChangeListeners(): void {
     }
 }
 
+/**
+ * Adopt a fetched remote config only while `environment` is still the
+ * effective one; a config for a superseded environment is discarded.
+ */
+function adoptRemoteConfig(rc: RemoteConfig, environment: string): boolean {
+    if (_config?.environment !== environment) {
+        log(_config?.debug, `discarding remote config for "${environment}": no longer the effective environment`);
+        return false;
+    }
+    _remoteConfig = rc;
+    _remoteConfigEnvironment = environment;
+    if (environment === _configuredEnvironment) {
+        _configuredRemoteConfig = rc;
+    }
+    _onRemoteConfigLoaded?.(rc);
+    return true;
+}
+
+/**
+ * Re-fetch the remote config for the current effective environment so a
+ * manually shown banner/modal presents the latest translations and button
+ * configuration. Failures fall back to the cached config — a refresh must
+ * never prevent the consent UI from showing. No-op before configure() and on
+ * web (where the SDK never fetches the remote config).
+ */
+async function refreshRemoteConfig(): Promise<void> {
+    const config = _config;
+    if (!config || _handledByPlatform) return;
+
+    const requestId = _environmentChangeRequestId;
+
+    try {
+        const rc = await fetchRemoteConfig(config);
+
+        // Discard stale results if the environment changed mid-flight, or if
+        // the active config was replaced while this fetch was pending (a
+        // concurrent setEnvironment/resetEnvironment/configure committed).
+        if (requestId !== _environmentChangeRequestId || _config !== config) return;
+
+        adoptRemoteConfig(rc, config.environment);
+    } catch (error) {
+        warn(config.debug, "remote config refresh failed — using cached config", error);
+        void sendError({
+            msg: error instanceof Error ? error.message : String(error),
+            fn: "Enforce.refreshRemoteConfig",
+            config,
+            clientId: _remoteConfig?.clientId,
+        });
+    }
+}
+
 function _showUIComponent(
     label: 'Banner' | 'Modal',
     shouldShow: (rc: RemoteConfig | null) => boolean,
@@ -269,6 +429,14 @@ function _showUIComponent(
     presenter();
 }
 
+function presentBanner(): void {
+    _showUIComponent('Banner', shouldShowBanner, hasBannerConfig, _onShowBanner);
+}
+
+function presentModal(): void {
+    _showUIComponent('Modal', shouldShowModal, hasModalConfig, _onShowModal);
+}
+
 // ---------------------------------------------------------------------------
 // Public singleton
 // ---------------------------------------------------------------------------
@@ -281,6 +449,8 @@ export const Enforce = {
     /**
      * Register UI callbacks from <EnforceProvider>.
      * Called internally — not part of the public consumer API.
+     * Returns an unregister function, which only clears the callbacks if they
+     * have not since been replaced by another registration.
      */
     _registerCallbacks(callbacks: {
         showBanner: () => void;
@@ -288,12 +458,21 @@ export const Enforce = {
         showModal: () => void;
         hideModal: () => void;
         onRemoteConfigLoaded: (rc: RemoteConfig) => void;
-    }): void {
+    }): () => void {
         _onShowBanner = callbacks.showBanner;
         _onHideBanner = callbacks.hideBanner;
         _onShowModal = callbacks.showModal;
         _onHideModal = callbacks.hideModal;
         _onRemoteConfigLoaded = callbacks.onRemoteConfigLoaded;
+
+        return () => {
+            if (_onShowBanner !== callbacks.showBanner) return;
+            _onShowBanner = null;
+            _onHideBanner = null;
+            _onShowModal = null;
+            _onHideModal = null;
+            _onRemoteConfigLoaded = null;
+        };
     },
 
     // -----------------------------------------------------------------------
@@ -310,31 +489,91 @@ export const Enforce = {
      */
     async configure(config: EnforceConfig): Promise<void> {
         log(config.debug, "configure()", config);
+
+        // Structurally validate the theme before any side effects so a
+        // malformed theme document fails fast on every platform, leaving the
+        // current configuration and any in-flight calls untouched.
+        let parsedTheme: ParsedTheme | undefined;
+        if (config.theme !== undefined) {
+            parsedTheme = parseThemeInput(config.theme);
+        }
+
         const configureStartTimestamp = now();
         _fallbackConsent = null;
+        _resolvedTheme = null;
+        // Invalidate in-flight setEnvironment/refresh completions from a
+        // previous configuration so they cannot overwrite this one.
+        ++_environmentChangeRequestId;
+        const generation = ++_configureGeneration;
+        // A newer configure() started while this one was awaiting: it owns
+        // the SDK state from here, so this call must stop applying any.
+        const isSuperseded = () => generation !== _configureGeneration;
 
         const handledByPlatform = await configurePlatform(config);
+        if (isSuperseded()) return;
+        _handledByPlatform = handledByPlatform;
+        _configuredRemoteConfig = null;
         if (handledByPlatform) {
+            if (parsedTheme) {
+                log(config.debug, "theme is ignored on web: the consent UI is not rendered by this SDK");
+            }
             _config = config;
+            _configuredEnvironment = config.environment;
             _remoteConfig = null;
+            _remoteConfigEnvironment = null;
             return;
         }
 
         // Set config before the fetch so consent helpers are usable on failure.
         _config = config;
+        _configuredEnvironment = config.environment;
+
+        // Apply a persisted environment override from a previous
+        // setEnvironment(). Everything downstream uses the effective value.
+        const environmentOverride = await getValidEnvironmentOverride(config);
+        if (isSuperseded()) return;
+        if (environmentOverride && environmentOverride !== config.environment) {
+            log(config.debug, "applying persisted environment override", environmentOverride);
+            config = { ...config, environment: environmentOverride };
+            _config = config;
+        }
+
+        if (parsedTheme) {
+            _resolvedTheme = resolveTheme(parsedTheme, (msg) => warn(config.debug, msg));
+        }
 
         // Load and validate stored consent before the fetch so it is available
         // for the billing beacon's cookie flags and for the fetch-failure path.
         const stored = await this._loadStoredConsent();
+        if (isSuperseded()) return;
         const validation = stored
             ? validateConsentData(stored, config)
             : { valid: false, reason: "no stored consent found", consentData: null };
 
+        // Stored consent that is no longer valid (expired or version mismatch)
+        // is removed together with its reported flags, so beacons start clean.
+        if (stored && !validation.valid) {
+            await clearReportedFlags();
+            await clearConsent();
+            if (isSuperseded()) return;
+        }
+
+        // Rewrite valid older-format consent in the current format, so later
+        // reads stop re-deriving it.
+        if (validation.valid && validation.consentData && isLegacyConsent(stored)) {
+            try {
+                await saveConsent(validation.consentData);
+            } catch (error) {
+                warn(config.debug, "failed to migrate stored consent to the current format", error);
+            }
+            if (isSuperseded()) return;
+        }
+
         // Fetch remote config
         try {
             const rc = await fetchRemoteConfig(config);
-            _remoteConfig = rc;
-            _onRemoteConfigLoaded?.(rc);
+            if (isSuperseded()) return;
+            adoptRemoteConfig(rc, config.environment);
             await sendReportingBeacon({
                 config,
                 remoteConfig: rc,
@@ -343,6 +582,7 @@ export const Enforce = {
                 cookieFlags: validation.valid && validation.consentData ? validation.consentData.categories : undefined,
             });
         } catch (e) {
+            if (isSuperseded()) return;
             log(config.debug, "remote config fetch failed", e);
             void sendError({
                 msg: e instanceof Error ? e.message : String(e),
@@ -350,6 +590,11 @@ export const Enforce = {
                 config,
                 clientId: _remoteConfig?.clientId,
             });
+
+            // A stale remote config from a previous configure() must not
+            // masquerade as this configuration (e.g. via getConfiguration()).
+            _remoteConfig = null;
+            _remoteConfigEnvironment = null;
 
             // Remote translations are unavailable — never show UI.
             // Notify onConsent handlers with whatever consent is available.
@@ -371,6 +616,8 @@ export const Enforce = {
             log(config.debug, "remote config failed — no consent available");
             return;
         }
+
+        if (isSuperseded()) return;
 
         log(config.debug, "stored consent validation", {
             reason: validation.reason,
@@ -403,7 +650,9 @@ export const Enforce = {
             }
 
             log(config.debug, "no valid consent — showing banner");
-            this.showBanner();
+            // Present directly — the remote config was fetched moments ago,
+            // so the showBanner() refresh would be a redundant second fetch.
+            presentBanner();
             return;
         }
 
@@ -420,7 +669,7 @@ export const Enforce = {
             }
 
             log(config.debug, "no valid consent — showing modal");
-            this.showModal();
+            presentModal();
             return;
         }
 
@@ -439,6 +688,9 @@ export const Enforce = {
     /**
      * Change the active environment only after the corresponding remote config
      * has been fetched and validated successfully.
+     *
+     * On web the environment is validated and returned, but nothing is
+     * applied or persisted.
      */
     async setEnvironment(environment: string): Promise<RemoteConfig> {
         const currentConfig = requireConfig();
@@ -451,7 +703,7 @@ export const Enforce = {
                 config: currentConfig,
                 clientId: _remoteConfig?.clientId,
             });
-            throw EnforceError.invalidConfig("environment is required.");
+            throw EnforceError.invalidEnvironment("environment is required.");
         }
 
         const nextConfig: EnforceConfig = {
@@ -462,19 +714,37 @@ export const Enforce = {
 
         log(currentConfig.debug, "setEnvironment() validating", nextEnvironment);
 
+        let stale = false;
         try {
             const nextRemoteConfig = await fetchRemoteConfig(nextConfig);
 
             // Ignore stale completions so older requests cannot overwrite newer ones.
             if (requestId !== _environmentChangeRequestId) {
+                stale = true;
                 throw EnforceError.invalidConfig(
                     `Ignoring stale environment change for "${nextEnvironment}".`
                 );
             }
 
             _config = nextConfig;
-            _remoteConfig = nextRemoteConfig;
-            _onRemoteConfigLoaded?.(nextRemoteConfig);
+
+            // On web the consent UI is platform-managed, so the fetched config
+            // is returned to the caller but never published to the SDK.
+            if (_handledByPlatform) {
+                log(
+                    currentConfig.debug,
+                    "setEnvironment() validated but not applied on web: the consent UI is not rendered by this SDK",
+                    nextEnvironment
+                );
+                return nextRemoteConfig;
+            }
+
+            adoptRemoteConfig(nextRemoteConfig, nextEnvironment);
+
+            // Persist the override so future launches use this environment
+            // until it expires or resetEnvironment() is called. The write is
+            // skipped if a newer environment change starts before it lands.
+            await persistEnvironmentOverride(nextEnvironment, currentConfig, requestId);
 
             log(currentConfig.debug, "setEnvironment() committed", nextEnvironment);
 
@@ -482,14 +752,66 @@ export const Enforce = {
         } catch (error) {
             // Preserve the previous config/remote config on any failure.
             log(currentConfig.debug, "setEnvironment() failed", nextEnvironment, error);
-            void sendError({
-                msg: error instanceof Error ? error.message : String(error),
-                fn: "Enforce.setEnvironment.fetchRemoteConfig",
-                config: nextConfig,
-                clientId: _remoteConfig?.clientId,
-            });
+            // A stale completion is expected control flow, not an error.
+            if (!stale) {
+                void sendError({
+                    msg: error instanceof Error ? error.message : String(error),
+                    fn: "Enforce.setEnvironment.fetchRemoteConfig",
+                    config: nextConfig,
+                    clientId: _remoteConfig?.clientId,
+                });
+            }
             throw error;
         }
+    },
+
+    /**
+     * The effective environment: an active setEnvironment() override if one
+     * exists, otherwise the environment passed to configure(). Returns null
+     * before configure() has run.
+     */
+    getEnvironment(): string | null {
+        return _config?.environment ?? null;
+    },
+
+    /**
+     * Discard the persisted environment override and revert to the
+     * environment supplied to configure(), for this session and future
+     * launches.
+     *
+     * The configured environment's remote config is restored from the copy
+     * kept at configure() time. When there is none (the app launched with an
+     * override applied), it is refetched in the background; until that lands
+     * getConfiguration() returns null, while the consent UI and beacons
+     * keep using the previous config. Calling this again retries a failed
+     * refetch.
+     */
+    async resetEnvironment(): Promise<void> {
+        const config = requireConfig();
+
+        // Invalidate any in-flight setEnvironment so a stale completion
+        // cannot overwrite the reset.
+        ++_environmentChangeRequestId;
+
+        await clearEnvironmentOverride();
+
+        // Re-read after the await: a configure() may have replaced the config.
+        let current = requireConfig();
+        if (_configuredEnvironment && current.environment !== _configuredEnvironment) {
+            current = _config = { ...current, environment: _configuredEnvironment };
+        }
+
+        log(config.debug, "resetEnvironment()", _configuredEnvironment);
+
+        const environment = current.environment;
+        if (_remoteConfigEnvironment === environment) return;
+
+        if (_configuredRemoteConfig) {
+            adoptRemoteConfig(_configuredRemoteConfig, environment);
+            return;
+        }
+
+        void refreshRemoteConfig();
     },
 
     // -----------------------------------------------------------------------
@@ -563,6 +885,32 @@ export const Enforce = {
 
             await saveConsent(data);
 
+            // The environment override's lifetime always tracks the latest
+            // consent period. An already-expired override must not be
+            // revived, so only a still-valid one is re-aligned.
+            //
+            // Only the override the session is running on is re-aligned, and
+            // only if no environment change started meanwhile. Checked with no
+            // await before the write: setEnvironment() switches _config before
+            // persisting, so a re-align holding an older override cannot write
+            // it over a newer one, and a reset cannot be undone either.
+            try {
+                const requestId = _environmentChangeRequestId;
+                const overrideEnvironment = await getValidEnvironmentOverride(config);
+                if (
+                    overrideEnvironment &&
+                    overrideEnvironment === _config?.environment &&
+                    requestId === _environmentChangeRequestId
+                ) {
+                    await saveEnvironmentOverride(
+                        overrideEnvironment,
+                        data.savedAt + data.dataRetentionPeriod
+                    );
+                }
+            } catch (error) {
+                warn(config.debug, "failed to re-align environment override expiry", error);
+            }
+
             log(config.debug, "setConsent()", merged);
             await sendReportingBeacon({
                 config,
@@ -618,6 +966,7 @@ export const Enforce = {
     async clearConsent(): Promise<void> {
         _fallbackConsent = null;
         await clearConsent();
+        await clearReportedFlags();
         notifyConsentHandlers({}, _config?.debug);
         notifyConsentChangeListeners();
         this._hideBanner();
@@ -628,16 +977,18 @@ export const Enforce = {
     // Banner / modal control
     // -----------------------------------------------------------------------
 
-    showBanner(): void {
-        _showUIComponent('Banner', shouldShowBanner, hasBannerConfig, _onShowBanner);
+    async showBanner(): Promise<void> {
+        await refreshRemoteConfig();
+        presentBanner();
     },
 
     _hideBanner(): void {
         _onHideBanner?.();
     },
 
-    showModal(): void {
-        _showUIComponent('Modal', shouldShowModal, hasModalConfig, _onShowModal);
+    async showModal(): Promise<void> {
+        await refreshRemoteConfig();
+        presentModal();
     },
 
     _hideModal(): void {
@@ -648,8 +999,35 @@ export const Enforce = {
     // Accessors
     // -----------------------------------------------------------------------
 
+    /**
+     * The public configuration retrieved from the remote environment.json —
+     * clientId, version, enforcement, the enable flags, translations, and
+     * the banner/modal button configuration — for customers implementing
+     * their own consent experience.
+     *
+     * Returns `null` when the remote configuration is unavailable:
+     * before `configure()` has completed, when the remote fetch failed,
+     * after a `resetEnvironment()` whose refetch has not yet succeeded, or on
+     * web (where the consent UI is not rendered by this SDK). It never
+     * returns another environment's configuration.
+     *
+     * Only the public fields are returned, and each button entry is a
+     * boolean. The result is a copy, so changing it
+     * does not affect the SDK.
+     */
+    getConfiguration(): EnforceConfiguration | null {
+        if (!_remoteConfig || _remoteConfigEnvironment !== _config?.environment) {
+            return null;
+        }
+        return toEnforceConfiguration(_remoteConfig);
+    },
+
     _getRemoteConfig(): RemoteConfig | null {
         return _remoteConfig;
+    },
+
+    _getResolvedTheme(): ResolvedTheme | null {
+        return _resolvedTheme;
     },
 
     _isConfigured(): boolean {
