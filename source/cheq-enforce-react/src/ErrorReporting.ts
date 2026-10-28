@@ -1,7 +1,7 @@
 import type { EnforceConfig } from "./Types";
 import { log, warn } from "./logger";
+import { SDK_PLATFORM, SDK_VERSION } from "./version";
 
-const SDK_VERSION = "0.1.0";
 const PROD_HOST = "https://nexus.ensighten.com";
 const TEST_HOST = "https://nexus-test.ensighten.com";
 const ERROR_PATH = "/error/e.gif";
@@ -75,6 +75,8 @@ function buildErrorUrl(options: ErrorReportingOptions, appInfo: { appName: strin
         client: truncate(options.config.clientName ?? "", 256),
         publishPath: truncate(options.config.publishPath ?? "", 256),
         errorName: "SDKError",
+        utm_platform: SDK_PLATFORM,
+        utm_sdk_version: SDK_VERSION,
     });
 
     if (options.clientId && options.clientId.trim()) {

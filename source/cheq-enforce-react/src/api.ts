@@ -2,6 +2,7 @@ import type { EnforceConfig, RemoteConfig } from "./Types";
 import { sendError } from "./ErrorReporting";
 import { EnforceError } from "./Types";
 import { log } from "./logger";
+import { SDK_PLATFORM, SDK_VERSION } from "./version";
 
 const PROD_HOST = "https://nexus.ensighten.com";
 const TEST_HOST = "https://nexus-test.ensighten.com";
@@ -171,7 +172,7 @@ export async function fetchRemoteConfig(config: EnforceConfig): Promise<RemoteCo
         );
     }
 
-    const url = `${getBaseUrl(debug)}/${encodeURIComponent(clientName)}/${encodeURIComponent(publishPath)}/${encodeURIComponent(environment)}/${CONFIG_FILE}`;
+    const url = `${getBaseUrl(debug)}/${encodeURIComponent(clientName)}/${encodeURIComponent(publishPath)}/${encodeURIComponent(environment)}/${CONFIG_FILE}?utm_platform=${encodeURIComponent(SDK_PLATFORM)}&utm_sdk_version=${encodeURIComponent(SDK_VERSION)}`;
 
     log(debug, "fetchRemoteConfig →", url);
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { fetchRemoteConfig } from '../api';
+import { SDK_VERSION } from '../version';
 import type { EnforceConfig } from '../Types';
 
 vi.mock('../ErrorReporting', () => ({
@@ -121,6 +122,16 @@ describe('fetchRemoteConfig', () => {
             const result = await fetchRemoteConfig(CONFIG);
             expect(result.clientId).toBe('cid-1');
             expect(result.version).toBe('1.0');
+        });
+
+        it('requests environment.json with utm query parameters', async () => {
+            stubFetch(VALID_RESPONSE);
+            await fetchRemoteConfig(CONFIG);
+
+            const url = new URL(vi.mocked(fetch).mock.calls[0][0] as string);
+            expect(url.pathname).toBe('/privacy/environments/acme/prod/English/environment.json');
+            expect(url.searchParams.get('utm_platform')).toBe('react');
+            expect(url.searchParams.get('utm_sdk_version')).toBe(SDK_VERSION);
         });
 
         it('fills in default Allow All / Deny All labels when absent', async () => {

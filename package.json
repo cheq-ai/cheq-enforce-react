@@ -1,6 +1,6 @@
 {
   "name": "cheq-enforce-react-workspace",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "workspaces": [
     "source/*",
@@ -13,10 +13,14 @@
     "clean:dist": "rm -rf source/cheq-enforce-react/dist",
     "clean": "npm run clean:root && npm run clean:demo && npm run clean:src && npm run clean:dist",
     "build": "npm -w source/cheq-enforce-react run build",
+    "typecheck": "npm -w source/cheq-enforce-react run typecheck",
+    "verify-version": "node scripts/verify-version.mjs",
+    "set-version": "npm version --no-git-tag-version --workspaces --include-workspace-root",
     "start": "npm run build && npm --prefix sample-app/enforce-react-demo run start",
     "start:android": "npm run build && npm --prefix sample-app/enforce-react-demo run android",
     "start:ios": "npm run build && npm --prefix sample-app/enforce-react-demo run ios",
-    "start:web": "npm run build && npm --prefix sample-app/enforce-react-demo run web"
+    "start:web": "npm run build && npm --prefix sample-app/enforce-react-demo run web",
+    "test": "npm -w source/cheq-enforce-react run test"
   },
   "overrides": {
     "react": "19.1.0",
