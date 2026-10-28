@@ -22,6 +22,7 @@ import { ConsentBanner } from "./ConsentBanner";
 import { ConsentModal } from "./ConsentModal";
 import { Enforce } from "./Enforce";
 import { log } from "./logger";
+import type { ResolvedTheme } from "./ThemeTypes";
 import type { RemoteConfig } from "./Types";
 
 export interface EnforceProviderProps {
@@ -55,6 +56,7 @@ async function reportConsentEvent(eventFlags: Record<string, boolean>): Promise<
 
 export function EnforceProvider({ children }: EnforceProviderProps) {
     const [remoteConfig, setRemoteConfig] = useState<RemoteConfig | null>(null);
+    const [theme, setTheme] = useState<ResolvedTheme | null>(null);
     const [bannerVisible, setBannerVisible] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [currentConsent, setCurrentConsent] = useState<Record<string, boolean>>({});
@@ -67,7 +69,7 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
 
     // Register callbacks with the singleton
     useEffect(() => {
-        Enforce._registerCallbacks({
+        return Enforce._registerCallbacks({
             showBanner: () => {
                 pendingModalOpenRef.current = false;
                 
@@ -111,9 +113,14 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
                 
                 setModalVisible(false);
             },
-            onRemoteConfigLoaded: (rc) => setRemoteConfig(rc),
+            onRemoteConfigLoaded: (rc) => {
+                setRemoteConfig(rc);
+                // Theme resolution in configure() strictly precedes the fetch,
+                // so the resolved theme is current whenever a config lands.
+                setTheme(Enforce._getResolvedTheme());
+            },
         });
-    }, [reportConsentEvent]);
+    }, []);
 
     const handleBannerAcceptAll = useCallback(async () => {
         if (!remoteConfig) {
@@ -125,6 +132,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
             });
         } catch (err) {
             console.warn("[CheqEnforce] handleBannerAcceptAll: setConsent failed", err);
+            // Rethrow so the consent UI releases its submit lock.
+            throw err;
         }
     }, [remoteConfig]);
 
@@ -138,6 +147,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
             });
         } catch (err) {
             console.warn("[CheqEnforce] handleBannerRejectAll: setConsent failed", err);
+            // Rethrow so the consent UI releases its submit lock.
+            throw err;
         }
     }, [remoteConfig]);
 
@@ -151,6 +162,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
             });
         } catch (err) {
             console.warn("[CheqEnforce] handleModalAcceptAll: setConsent failed", err);
+            // Rethrow so the consent UI releases its submit lock.
+            throw err;
         }
     }, [remoteConfig]);
 
@@ -164,6 +177,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
             });
         } catch (err) {
             console.warn("[CheqEnforce] handleModalRejectAll: setConsent failed", err);
+            // Rethrow so the consent UI releases its submit lock.
+            throw err;
         }
     }, [remoteConfig]);
 
@@ -188,6 +203,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
             await Enforce._applyDefault({ BANNER_VIEWED: true });
         } catch (err) {
             console.warn("[CheqEnforce] handleBannerClose: applyDefault failed", err);
+            // Rethrow so the consent UI releases its submit lock.
+            throw err;
         }
     }, []);
 
@@ -197,6 +214,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
             await Enforce._setConsent(consent, { MODAL_VIEWED: true });
         } catch (err) {
             console.warn("[CheqEnforce] handleModalSave: setConsent failed", err);
+            // Rethrow so the consent UI releases its submit lock.
+            throw err;
         }
     }, []);
 
@@ -205,6 +224,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
             await Enforce._applyDefault({ MODAL_VIEWED: true });
         } catch (err) {
             console.warn("[CheqEnforce] handleModalClose: applyDefault failed", err);
+            // Rethrow so the consent UI releases its submit lock.
+            throw err;
         }
     }, []);
 
@@ -218,6 +239,8 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
                         visible={bannerVisible}
                         translation={remoteConfig.translation}
                         bannerConfig={remoteConfig.bannerConfig}
+                        theme={theme?.banner}
+                        debug={Enforce._getConfig()?.debug}
                         onAcceptAll={handleBannerAcceptAll}
                         onRejectAll={handleBannerRejectAll}
                         onOpenModal={handleOpenModal}
@@ -230,6 +253,7 @@ export function EnforceProvider({ children }: EnforceProviderProps) {
                         translation={remoteConfig.translation}
                         modalConfig={remoteConfig.consentModalConfig}
                         initialConsent={currentConsent}
+                        theme={theme?.modal}
                         debug={Enforce._getConfig()?.debug}
                         onAcceptAll={handleModalAcceptAll}
                         onRejectAll={handleModalRejectAll}

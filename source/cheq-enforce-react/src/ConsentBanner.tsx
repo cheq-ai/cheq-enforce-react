@@ -1,127 +1,161 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo } from "react";
 import {
     Modal,
     type ModalProps,
-    Pressable,
     StyleSheet,
     Text,
     View,
 } from "react-native";
+import { ConsentButton, type ButtonDescriptor } from "./ConsentButton";
+import { ConsentLogo } from "./ConsentLogo";
+import { warn } from "./logger";
+import { useSubmitGuard } from "./useSubmitGuard";
+import { DEFAULT_RESOLVED_THEME, orderVisibleButtons, withScaledLineHeight } from "./ThemeResolver";
+import type { BannerButtonName, ResolvedBannerTheme } from "./ThemeTypes";
 import type { BannerConfig, Translation } from "./Types";
 
 export interface ConsentBannerProps {
     visible: boolean;
     translation: Translation;
     bannerConfig: BannerConfig;
-    onAcceptAll: () => void;
-    onRejectAll: () => void;
-    onOpenModal: () => void;
-    onClose: () => void;
+    /** Resolved theme overrides. Omit for the default appearance. */
+    theme?: ResolvedBannerTheme;
+    debug?: boolean;
+    onAcceptAll: () => void | Promise<void>;
+    onRejectAll: () => void | Promise<void>;
+    onOpenModal: () => void | Promise<void>;
+    onClose: () => void | Promise<void>;
     onDismiss?: ModalProps["onDismiss"];
 }
+
+// Base font metrics of the banner content text (styles.content below) —
+// used to keep a themed fontSize from clipping against the baked lineHeight.
+const CONTENT_BASE_FONT_SIZE = 14;
+const CONTENT_BASE_LINE_HEIGHT = 20;
 
 export function ConsentBanner({
     visible,
     translation,
     bannerConfig,
+    theme,
+    debug,
     onAcceptAll,
     onRejectAll,
     onOpenModal,
     onClose,
     onDismiss,
 }: ConsentBannerProps) {
-    const [submitting, setSubmitting] = useState(false);
-    const submittingRef = useRef(false);
+    const { submitting, guard, handleRequestClose, reset } = useSubmitGuard(onClose);
 
     // Reset on every open so stale submitting state never blocks a fresh banner session.
     useEffect(() => {
-        if (visible) {
-            submittingRef.current = false;
-            setSubmitting(false);
-        }
-    }, [visible]);
+        if (visible) reset();
+    }, [visible, reset]);
 
-    function guard(fn: () => void): () => void {
-        return () => {
-            if (submittingRef.current) return;
-            submittingRef.current = true;
-            setSubmitting(true);
-            fn();
-        };
-    }
+    const t = theme ?? DEFAULT_RESOLVED_THEME.banner;
 
     const showAcceptAll = bannerConfig.ensAcceptAll.show;
     const showRejectAll = bannerConfig.ensRejectAll.show;
     const showPreferences = bannerConfig.ensOpenModal.show;
     const showClose = bannerConfig.ensCloseBanner.show;
 
+    // Which buttons appear is remote-config controlled; the theme only orders
+    // and styles them. Memoized so hidden-button skips are logged once.
+    const orderedButtons = useMemo(
+        () =>
+            orderVisibleButtons(
+                t.buttonOrder,
+                {
+                    acceptAll: showAcceptAll,
+                    rejectAll: showRejectAll,
+                    openModal: showPreferences,
+                    close: showClose,
+                },
+                (name) => warn(debug, `theme: banner button "${name}" is hidden by the remote config — skipping`)
+            ),
+        [t.buttonOrder, showAcceptAll, showRejectAll, showPreferences, showClose, debug]
+    );
+
+    const descriptors: Record<BannerButtonName, ButtonDescriptor> = {
+        acceptAll: {
+            role: "primary",
+            label: translation.notificationBannerAllowAll,
+            onPress: onAcceptAll,
+        },
+        rejectAll: {
+            // Same styling as acceptAll: accepting and rejecting must be
+            // equally prominent choices (GDPR).
+            role: "primary",
+            label: translation.notificationBannerDenyAll,
+            onPress: onRejectAll,
+        },
+        openModal: {
+            role: "secondary",
+            label: translation.notificationBannerPreferences,
+            onPress: onOpenModal,
+        },
+        close: {
+            role: "textOnly",
+            label: translation.close,
+            onPress: onClose,
+            accessibilityLabel: translation.close,
+        },
+    };
+
     return (
         <Modal
             visible={visible}
             transparent
             animationType="slide"
-            onRequestClose={onClose}
+            onRequestClose={handleRequestClose}
             onDismiss={onDismiss}
         >
-            <View style={styles.overlay}>
-                <View style={styles.container}>
-                    <Text style={styles.content}>
+            <View
+                style={[
+                    styles.overlay,
+                    t.overlayColor !== undefined && { backgroundColor: t.overlayColor },
+                ]}
+            >
+                <View
+                    style={[
+                        styles.container,
+                        t.backgroundColor !== undefined && { backgroundColor: t.backgroundColor },
+                    ]}
+                >
+                    {t.logo && <ConsentLogo logo={t.logo} />}
+
+                    <Text
+                        style={[
+                            styles.content,
+                            withScaledLineHeight(
+                                t.summaryDescription,
+                                CONTENT_BASE_FONT_SIZE,
+                                CONTENT_BASE_LINE_HEIGHT
+                            ),
+                        ]}
+                    >
                         {translation.notificationBannerContent}
                     </Text>
 
+                    {t.separatorColor !== undefined && (
+                        <View style={[styles.separator, { backgroundColor: t.separatorColor }]} />
+                    )}
+
                     <View style={styles.actions}>
-                        {showAcceptAll && (
-                            <Pressable
-                                style={({ pressed }) => [styles.button, styles.primaryButton, pressed && !submitting && styles.buttonPressed]}
-                                onPress={guard(onAcceptAll)}
-                                disabled={submitting}
-                                accessibilityRole="button"
-                            >
-                                <Text style={styles.primaryButtonText}>
-                                    {translation.notificationBannerAllowAll}
-                                </Text>
-                            </Pressable>
-                        )}
-
-                        {showRejectAll && (
-                            <Pressable
-                                style={({ pressed }) => [styles.button, styles.secondaryButton, pressed && !submitting && styles.buttonPressed]}
-                                onPress={guard(onRejectAll)}
-                                disabled={submitting}
-                                accessibilityRole="button"
-                            >
-                                <Text style={styles.secondaryButtonText}>
-                                    {translation.notificationBannerDenyAll}
-                                </Text>
-                            </Pressable>
-                        )}
-
-                        {showPreferences && (
-                            <Pressable
-                                style={({ pressed }) => [styles.button, styles.secondaryButton, pressed && !submitting && styles.buttonPressed]}
-                                onPress={guard(onOpenModal)}
-                                disabled={submitting}
-                                accessibilityRole="button"
-                            >
-                                <Text style={styles.secondaryButtonText}>
-                                    {translation.notificationBannerPreferences}
-                                </Text>
-                            </Pressable>
-                        )}
-
-                        {showClose && (
-                            <Pressable
-                                style={({ pressed }) => [styles.closeButton, pressed && !submitting && styles.buttonPressed]}
-                                onPress={guard(onClose)}
-                                disabled={submitting}
-                                accessibilityRole="button"
-                                accessibilityLabel={translation.close}
-                            >
-                                <Text style={styles.closeButtonText}>
-                                    {translation.close}
-                                </Text>
-                            </Pressable>
-                        )}
+                        {orderedButtons.map((name) => {
+                            const descriptor = descriptors[name];
+                            return (
+                                <ConsentButton
+                                    key={name}
+                                    label={descriptor.label}
+                                    role={descriptor.role}
+                                    themed={t.buttons[name]}
+                                    disabled={submitting}
+                                    onPress={guard(descriptor.onPress)}
+                                    accessibilityLabel={descriptor.accessibilityLabel}
+                                />
+                            );
+                        })}
                     </View>
                 </View>
             </View>
@@ -149,40 +183,10 @@ const styles = StyleSheet.create({
         color: "#333",
         lineHeight: 20,
     },
+    separator: {
+        height: StyleSheet.hairlineWidth,
+    },
     actions: {
         gap: 10,
-    },
-    button: {
-        borderRadius: 8,
-        paddingVertical: 12,
-        paddingHorizontal: 16,
-        alignItems: "center",
-    },
-    buttonPressed: {
-        opacity: 0.7,
-    },
-    primaryButton: {
-        backgroundColor: "#1a73e8",
-    },
-    primaryButtonText: {
-        color: "#fff",
-        fontWeight: "600",
-        fontSize: 15,
-    },
-    secondaryButton: {
-        backgroundColor: "#f0f0f0",
-    },
-    secondaryButtonText: {
-        color: "#333",
-        fontWeight: "500",
-        fontSize: 15,
-    },
-    closeButton: {
-        alignItems: "center",
-        paddingVertical: 8,
-    },
-    closeButtonText: {
-        color: "#888",
-        fontSize: 13,
     },
 });

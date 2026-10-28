@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Enforce } from '../Enforce';
+import { toEnforceConfiguration } from '../PublicConfiguration';
 import { configurePlatform } from '../configurePlatform';
 import { fetchRemoteConfig } from '../api';
 import { sendReportingBeacon } from '../ConsentReporting';
@@ -12,12 +13,16 @@ vi.mock('../api', () => ({ fetchRemoteConfig: vi.fn() }));
 vi.mock('../ConsentReporting', () => ({
     sendReportingBeacon: vi.fn(),
     resetReportingState: vi.fn(),
+    clearReportedFlags: vi.fn(),
 }));
 vi.mock('../ErrorReporting', () => ({ sendError: vi.fn() }));
 vi.mock('../Storage', () => ({
     loadConsent: vi.fn(),
     saveConsent: vi.fn(),
     clearConsent: vi.fn(),
+    loadEnvironmentOverride: vi.fn().mockResolvedValue(null),
+    saveEnvironmentOverride: vi.fn(),
+    clearEnvironmentOverride: vi.fn(),
 }));
 
 const TEST_CONFIG: EnforceConfig = {
@@ -146,6 +151,15 @@ describe('Enforce.getConsent — category filtering', () => {
 const REMOTE_BANNER_OFF: RemoteConfig = {
     clientId: 'cid', version: '1.0', enforcement: true,
     enablePrivacyNotice: false, enableConsentModal: false,
+    translation: { cookies: {} },
+    bannerConfig: {
+        ensAcceptAll: { show: true }, ensRejectAll: { show: true },
+        ensOpenModal: { show: true }, ensCloseBanner: { show: true },
+    },
+    consentModalConfig: {
+        ensConsentAcceptAll: { show: true }, ensConsentRejectAll: { show: true },
+        ensSaveModal: { show: true }, ensCloseModal: { show: true },
+    },
 } as unknown as RemoteConfig;
 
 const REMOTE_BANNER_ON_NO_CONFIG: RemoteConfig = {
@@ -250,7 +264,8 @@ describe('Enforce.setEnvironment', () => {
         enablePrivacyNotice: false, enableConsentModal: false,
     } as unknown as RemoteConfig;
 
-    beforeEach(setupEnforce);
+    // Native: the platform where a new environment's config is applied.
+    beforeEach(() => setupWithRemote(REMOTE_BANNER_OFF));
 
     it('updates config.environment and remoteConfig on success', async () => {
         vi.mocked(fetchRemoteConfig).mockResolvedValue(NEW_REMOTE);
@@ -290,6 +305,260 @@ describe('Enforce.setEnvironment', () => {
 
         expect(Enforce._getRemoteConfig()).toEqual(secondRemote);
     });
+
+    it('does not report a stale completion as an error', async () => {
+        let resolveFirst!: (rc: RemoteConfig) => void;
+        vi.mocked(fetchRemoteConfig)
+            .mockImplementationOnce(() => new Promise(r => { resolveFirst = r; }))
+            .mockResolvedValueOnce(NEW_REMOTE);
+
+        const firstCall = Enforce.setEnvironment('env-1');
+        await Enforce.setEnvironment('env-2');
+        resolveFirst(NEW_REMOTE);
+
+        // The caller still learns its change was superseded…
+        await expect(firstCall).rejects.toThrow('Ignoring stale environment change');
+        // …but it is expected control flow, so no error beacon is sent.
+        expect(sendError).not.toHaveBeenCalledWith(
+            expect.objectContaining({ fn: 'Enforce.setEnvironment.fetchRemoteConfig' })
+        );
+    });
+
+    describe('on web, where the consent UI is platform-managed', () => {
+        beforeEach(setupEnforce);
+
+        it('validates and returns the config without publishing it', async () => {
+            vi.mocked(fetchRemoteConfig).mockResolvedValue(NEW_REMOTE);
+
+            await expect(Enforce.setEnvironment('new-env')).resolves.toEqual(NEW_REMOTE);
+
+            // configure() leaves the remote config null on web.
+            expect(Enforce._getRemoteConfig()).toBeNull();
+            expect(Enforce.getConfiguration()).toBeNull();
+        });
+
+        it('does not notify the UI layer of a new remote config', async () => {
+            const onRemoteConfigLoaded = vi.fn();
+            Enforce._registerCallbacks({
+                showBanner: vi.fn(), hideBanner: vi.fn(),
+                showModal: vi.fn(), hideModal: vi.fn(),
+                onRemoteConfigLoaded,
+            });
+            vi.mocked(fetchRemoteConfig).mockResolvedValue(NEW_REMOTE);
+
+            await Enforce.setEnvironment('new-env');
+
+            expect(onRemoteConfigLoaded).not.toHaveBeenCalled();
+        });
+
+        it('still surfaces a failed validation to the caller', async () => {
+            vi.mocked(fetchRemoteConfig).mockRejectedValue(new Error('network error'));
+            await expect(Enforce.setEnvironment('bad-env')).rejects.toThrow('network error');
+        });
+    });
+});
+
+// -----------------------------------------------------------------------
+// configure — older-format consent migration
+// -----------------------------------------------------------------------
+
+describe('Enforce.configure — older-format consent migration', () => {
+    const legacyConsent = (overrides: Record<string, unknown> = {}) =>
+        ({
+            categories: { analytics: true },
+            expiresAt: NOW + 86_400_000,
+            version: 'v1',
+            ...overrides,
+        }) as unknown as ConsentData;
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('rewrites valid older-format consent in the current format', async () => {
+        const stored = legacyConsent();
+        await setupWithRemote(REMOTE_BANNER_OFF, stored);
+
+        expect(saveConsent).toHaveBeenCalledOnce();
+        const saved = vi.mocked(saveConsent).mock.calls[0][0];
+        expect(saved).toMatchObject({ categories: { analytics: true }, version: 'v1' });
+        expect(saved).not.toHaveProperty('expiresAt');
+        expect(saved.savedAt + saved.dataRetentionPeriod).toBe(
+            (stored as unknown as { expiresAt: number }).expiresAt
+        );
+    });
+
+    it('preserves the exact expiry even when the clock moves during migration', async () => {
+        await setupWithRemote(REMOTE_BANNER_OFF, null);
+        const expiresAt = NOW + 86_400_000;
+        vi.mocked(loadConsent).mockResolvedValue(legacyConsent({ expiresAt }));
+        // Every Date.now() call returns a later time.
+        let clock = NOW;
+        vi.spyOn(Date, 'now').mockImplementation(() => (clock += 7));
+
+        await Enforce.configure(TEST_CONFIG);
+
+        const saved = vi.mocked(saveConsent).mock.calls[0][0];
+        expect(saved.savedAt + saved.dataRetentionPeriod).toBe(expiresAt);
+    });
+
+    it('does not rewrite current-format consent', async () => {
+        await setupWithRemote(REMOTE_BANNER_OFF, validConsent());
+        expect(saveConsent).not.toHaveBeenCalled();
+    });
+
+    it('clears expired older-format consent instead of rewriting it', async () => {
+        await setupWithRemote(REMOTE_BANNER_OFF, legacyConsent({ expiresAt: NOW - 1_000 }));
+        expect(saveConsent).not.toHaveBeenCalled();
+        expect(clearConsent).toHaveBeenCalledOnce();
+    });
+
+    it('clears older-format consent with a stale version instead of rewriting it', async () => {
+        await setupWithRemote(REMOTE_BANNER_OFF, legacyConsent({ version: 'v0' }));
+        expect(saveConsent).not.toHaveBeenCalled();
+        expect(clearConsent).toHaveBeenCalledOnce();
+    });
+
+    it('still completes configure() when the rewrite fails', async () => {
+        await setupWithRemote(REMOTE_BANNER_OFF, null);
+        vi.mocked(loadConsent).mockResolvedValue(legacyConsent());
+        vi.mocked(saveConsent).mockRejectedValueOnce(new Error('storage full'));
+        vi.mocked(sendReportingBeacon).mockClear();
+
+        await expect(Enforce.configure(TEST_CONFIG)).resolves.toBeUndefined();
+
+        // configure() carried on past the failed rewrite to its billing beacon.
+        expect(sendReportingBeacon).toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'billing' })
+        );
+        await expect(Enforce.getConsent()).resolves.toEqual({ analytics: true });
+    });
+});
+
+// -----------------------------------------------------------------------
+// getConfiguration — returns a copy
+// -----------------------------------------------------------------------
+
+describe('Enforce.getConfiguration', () => {
+    it('returns a copy: mutating it does not change SDK state', async () => {
+        const remote = {
+            ...REMOTE_BANNER_OFF,
+            translation: { cookies: { Analytics: { title: 'Analytics', description: 'Stats' } } },
+        } as unknown as RemoteConfig;
+        await setupWithRemote(remote, validConsent());
+
+        const configuration = Enforce.getConfiguration();
+        configuration!.clientId = 'tampered';
+        configuration!.translation.cookies!.Injected = { title: 'x', description: 'y' };
+        configuration!.translation.cookies!.Analytics.title = 'tampered';
+        configuration!.bannerConfig!.ensAcceptAll = false;
+
+        expect(Enforce._getRemoteConfig()!.clientId).toBe('cid');
+        expect(Enforce._getRemoteConfig()!.translation.cookies).not.toHaveProperty('Injected');
+        expect(Enforce._getRemoteConfig()!.translation.cookies.Analytics.title).toBe('Analytics');
+        expect(Enforce._getRemoteConfig()!.bannerConfig.ensAcceptAll.show).toBe(true);
+        const again = Enforce.getConfiguration();
+        expect(again!.clientId).toBe('cid');
+        expect(again!.translation.cookies).not.toHaveProperty('Injected');
+        expect(again!.translation.cookies!.Analytics.title).toBe('Analytics');
+        expect(again!.bannerConfig!.ensAcceptAll).toBe(true);
+    });
+});
+
+// -----------------------------------------------------------------------
+// _registerCallbacks — unregister
+// -----------------------------------------------------------------------
+
+describe('Enforce._registerCallbacks', () => {
+    const makeCallbacks = () => ({
+        showBanner: vi.fn(), hideBanner: vi.fn(),
+        showModal: vi.fn(), hideModal: vi.fn(),
+        onRemoteConfigLoaded: vi.fn(),
+    });
+
+    it('unregister clears the callbacks', () => {
+        const callbacks = makeCallbacks();
+        const unregister = Enforce._registerCallbacks(callbacks);
+
+        unregister();
+        Enforce._hideBanner();
+        Enforce._hideModal();
+
+        expect(callbacks.hideBanner).not.toHaveBeenCalled();
+        expect(callbacks.hideModal).not.toHaveBeenCalled();
+    });
+
+    it('a stale unregister does not clear a newer registration', () => {
+        const first = makeCallbacks();
+        const second = makeCallbacks();
+        const unregisterFirst = Enforce._registerCallbacks(first);
+        Enforce._registerCallbacks(second);
+
+        unregisterFirst();
+        Enforce._hideBanner();
+
+        expect(second.hideBanner).toHaveBeenCalledOnce();
+        expect(first.hideBanner).not.toHaveBeenCalled();
+    });
+});
+
+// -----------------------------------------------------------------------
+// configure — a superseded call stops applying state
+// -----------------------------------------------------------------------
+
+describe('Enforce.configure — overlapping calls', () => {
+    const firstRemote = { ...REMOTE_BANNER_ON, clientId: 'first' } as RemoteConfig;
+    const secondRemote = { ...REMOTE_BANNER_OFF, clientId: 'second' } as RemoteConfig;
+
+    it('keeps the newer call\'s remote config when the older fetch resolves last', async () => {
+        await setupWithRemote(REMOTE_BANNER_OFF, null);
+        const showBanner = vi.fn();
+        Enforce._registerCallbacks({
+            showBanner, hideBanner: vi.fn(),
+            showModal: vi.fn(), hideModal: vi.fn(),
+            onRemoteConfigLoaded: vi.fn(),
+        });
+        let resolveFirst!: (rc: RemoteConfig) => void;
+        vi.mocked(fetchRemoteConfig).mockClear();
+        vi.mocked(fetchRemoteConfig)
+            .mockImplementationOnce(() => new Promise(r => { resolveFirst = r; }))
+            .mockResolvedValueOnce(secondRemote);
+        vi.mocked(sendReportingBeacon).mockClear();
+
+        const first = Enforce.configure({ ...TEST_CONFIG, environment: 'first-env' });
+        // Let the older call reach its fetch before the newer one starts.
+        await vi.waitFor(() => expect(fetchRemoteConfig).toHaveBeenCalledTimes(1));
+        await Enforce.configure({ ...TEST_CONFIG, environment: 'second-env' });
+        resolveFirst(firstRemote);
+        await first;
+
+        expect(Enforce._getRemoteConfig()).toEqual(secondRemote);
+        expect(Enforce._getConfig()?.environment).toBe('second-env');
+        // The older call must not show its banner or send its billing beacon.
+        expect(showBanner).not.toHaveBeenCalled();
+        expect(sendReportingBeacon).toHaveBeenCalledTimes(1);
+        expect(sendReportingBeacon).toHaveBeenCalledWith(
+            expect.objectContaining({ remoteConfig: secondRemote })
+        );
+    });
+
+    it('does not clear the newer call\'s config when the older fetch fails last', async () => {
+        await setupWithRemote(REMOTE_BANNER_OFF, null);
+        let rejectFirst!: (e: Error) => void;
+        vi.mocked(fetchRemoteConfig).mockClear();
+        vi.mocked(fetchRemoteConfig)
+            .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject; }))
+            .mockResolvedValueOnce(secondRemote);
+
+        const first = Enforce.configure({ ...TEST_CONFIG, environment: 'first-env' });
+        await vi.waitFor(() => expect(fetchRemoteConfig).toHaveBeenCalledTimes(1));
+        await Enforce.configure({ ...TEST_CONFIG, environment: 'second-env' });
+        rejectFirst(new Error('network down'));
+        await first;
+
+        expect(Enforce._getRemoteConfig()).toEqual(secondRemote);
+        expect(Enforce.getConfiguration()).toEqual(toEnforceConfiguration(secondRemote));
+    });
 });
 
 // -----------------------------------------------------------------------
@@ -299,12 +568,12 @@ describe('Enforce.setEnvironment', () => {
 describe('Enforce.setEnvironment — empty/whitespace validation (W2)', () => {
     beforeEach(setupEnforce);
 
-    it('rejects with invalidConfig when called with an empty string', async () => {
-        await expect(Enforce.setEnvironment('')).rejects.toMatchObject({ kind: 'invalidConfig' });
+    it('rejects with invalidEnvironment when called with an empty string', async () => {
+        await expect(Enforce.setEnvironment('')).rejects.toMatchObject({ kind: 'invalidEnvironment' });
     });
 
-    it('rejects with invalidConfig when called with a whitespace-only string', async () => {
-        await expect(Enforce.setEnvironment('   ')).rejects.toMatchObject({ kind: 'invalidConfig' });
+    it('rejects with invalidEnvironment when called with a whitespace-only string', async () => {
+        await expect(Enforce.setEnvironment('   ')).rejects.toMatchObject({ kind: 'invalidEnvironment' });
     });
 
     it('does not call fetchRemoteConfig when environment string is empty', async () => {
@@ -397,14 +666,14 @@ describe('Enforce.showBanner — guard branches', () => {
     it('does not call sendError when enablePrivacyNotice is false', async () => {
         await setupWithRemote(REMOTE_BANNER_OFF);
         vi.mocked(sendError).mockClear();
-        Enforce.showBanner();
+        await Enforce.showBanner();
         expect(sendError).not.toHaveBeenCalled();
     });
 
     it('calls sendError when enablePrivacyNotice is true but bannerConfig is absent', async () => {
         await setupWithRemote(REMOTE_BANNER_ON_NO_CONFIG);
         vi.mocked(sendError).mockClear();
-        Enforce.showBanner();
+        await Enforce.showBanner();
         expect(sendError).toHaveBeenCalled();
     });
 
@@ -412,7 +681,7 @@ describe('Enforce.showBanner — guard branches', () => {
         await setupWithRemote(REMOTE_BANNER_ON);
         // No _registerCallbacks — _onShowBanner remains null
         vi.mocked(sendError).mockClear();
-        Enforce.showBanner();
+        await Enforce.showBanner();
         expect(sendError).toHaveBeenCalled();
     });
 });
@@ -421,14 +690,14 @@ describe('Enforce.showModal — guard branches', () => {
     it('does not call sendError when enableConsentModal is false', async () => {
         await setupWithRemote(REMOTE_MODAL_OFF);
         vi.mocked(sendError).mockClear();
-        Enforce.showModal();
+        await Enforce.showModal();
         expect(sendError).not.toHaveBeenCalled();
     });
 
     it('calls sendError when enableConsentModal is true but consentModalConfig is absent', async () => {
         await setupWithRemote(REMOTE_MODAL_ON_NO_CONFIG);
         vi.mocked(sendError).mockClear();
-        Enforce.showModal();
+        await Enforce.showModal();
         expect(sendError).toHaveBeenCalled();
     });
 
@@ -436,7 +705,7 @@ describe('Enforce.showModal — guard branches', () => {
         await setupWithRemote(REMOTE_MODAL_ON);
         // No _registerCallbacks — _onShowModal remains null
         vi.mocked(sendError).mockClear();
-        Enforce.showModal();
+        await Enforce.showModal();
         expect(sendError).toHaveBeenCalled();
     });
 });

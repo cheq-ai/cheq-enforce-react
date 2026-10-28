@@ -20,9 +20,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.12.0
+      - name: Verify version matches the tag
+        run: npm run verify-version -- "${GITHUB_REF_NAME}"
       - run: npm ci
+      - run: npm run typecheck
       - run: npm run build
-      - run: npm -w source/cheq-enforce-react test
+      - run: npm test
 
   publish-npm:
     needs: build
